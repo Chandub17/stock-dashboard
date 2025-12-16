@@ -7,85 +7,40 @@ import {
   LinearScale,
   PointElement,
   LineElement,
-  Title,
   Tooltip,
   Legend
 } from 'chart.js';
-import 'chartjs-adapter-date-fns';
 import './index.css';
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend
-);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
 
-// -----------------------
-// Helpers
-// -----------------------
 const getToken = () => localStorage.getItem('token');
 const getEmail = () => localStorage.getItem('email');
 
-function normalizePortfolio(portfolio) {
-  if (!portfolio) return { cash: 0, realized: 0, holdings: [], unrealized: 0 };
+function recalcPortfolio(p, prices) {
+  const holdings = p.holdings.map(h => {
+    const cp = prices[h.ticker] ?? h.current_price ?? 0;
+    const pl = +((cp - h.avg_cost) * h.qty).toFixed(2);
+    return { ...h, current_price: cp, unrealized: pl };
+  });
   return {
-    cash: Number(portfolio.cash || 0),
-    realized: Number(portfolio.realized || 0),
-    holdings: portfolio.holdings || [],
-    unrealized: Number(portfolio.unrealized || 0)
+    ...p,
+    holdings,
+    unrealized: +holdings.reduce((s, h) => s + h.unrealized, 0).toFixed(2)
   };
 }
 
-function recalcPortfolioWithPrices(portfolio, prices) {
-  const holdings = portfolio.holdings.map(h => {
-    const current = prices[h.ticker] ?? h.current_price ?? 0;
-    const unrealized = +((current - h.avg_cost) * h.qty).toFixed(2);
-    return { ...h, current_price: current, unrealized };
-  });
-  const unrealized = holdings.reduce((s, h) => s + h.unrealized, 0);
-  return { ...portfolio, holdings, unrealized: +unrealized.toFixed(2) };
-}
-
-// -----------------------
-// Chart options
-// -----------------------
-const chartOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { labels: { color: '#fff' } },
-    tooltip: {
-      backgroundColor: '#0b1220',
-      titleColor: '#fff',
-      bodyColor: '#e5e7eb'
-    }
-  },
-  scales: {
-    x: { ticks: { color: '#9ca3af' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-    y: { ticks: { color: '#9ca3af' }, grid: { color: 'rgba(255,255,255,0.05)' } }
-  }
-};
-
-// -----------------------
-// MAIN
-// -----------------------
 export default function Dashboard() {
-  const email = getEmail();
   const token = getToken();
+  const email = getEmail();
 
   const [connected, setConnected] = useState(false);
-  const [supported, setSupported] = useState(['GOOG','TSLA','AMZN','META','NVDA']);
   const [prices, setPrices] = useState({});
-  const [portfolio, setPortfolio] = useState({ cash:0, realized:0, holdings: [], unrealized:0 });
-  const [selectedTicker, setSelectedTicker] = useState('GOOG');
+  const [supported, setSupported] = useState(['GOOG','TSLA','AMZN','META','NVDA']);
+  const [portfolio, setPortfolio] = useState({ cash:0, holdings:[], unrealized:0 });
+  const [ticker, setTicker] = useState('GOOG');
   const [history, setHistory] = useState([]);
   const [qty, setQty] = useState(1);
-  const [tradeMsg, setTradeMsg] = useState('');
-  const [depositAmount, setDepositAmount] = useState('');
   const socketRef = useRef(null);
 
   useEffect(() => {
@@ -105,122 +60,104 @@ export default function Dashboard() {
 
     socket.on('stockUpdate', p => {
       setPrices(p);
-      setPortfolio(prev => recalcPortfolioWithPrices(prev, p));
+      setPortfolio(prev => recalcPortfolio(prev, p));
     });
 
-    socket.on('historyUpdate', all => {
-      if (all[selectedTicker]) setHistory(all[selectedTicker]);
+    socket.on('historyUpdate', h => {
+      if (h[ticker]) setHistory(h[ticker]);
     });
 
     socket.on('portfolioUpdate', p => {
-      setPortfolio(recalcPortfolioWithPrices(normalizePortfolio(p), prices));
+      setPortfolio(recalcPortfolio(p, prices));
     });
 
     fetch('/me', { headers: { Authorization: 'Bearer ' + token } })
       .then(r => r.json())
       .then(d => {
-        setSupported(d.supported || supported);
-        setPortfolio(recalcPortfolioWithPrices(normalizePortfolio(d.portfolio), prices));
+        setSupported(d.supported);
+        setPortfolio(recalcPortfolio(d.portfolio, prices));
       });
 
     return () => socket.disconnect();
-  }, [token, selectedTicker]);
+  }, [token, ticker]);
 
-  async function doTrade(type) {
-    setTradeMsg('');
-    const res = await fetch('/trade', {
+  async function trade(type) {
+    await fetch('/trade', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: 'Bearer ' + token
       },
-      body: JSON.stringify({ type, ticker: selectedTicker, qty: Number(qty) })
+      body: JSON.stringify({ type, ticker, qty: Number(qty) })
     });
-    const data = await res.json();
-    setTradeMsg(res.ok ? `Order placed: ${type.toUpperCase()} ${qty} ${selectedTicker}` : data.error);
-  }
-
-  async function depositCash() {
-    await fetch('/deposit', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + token
-      },
-      body: JSON.stringify({ amount: Number(depositAmount) })
-    });
-    setDepositAmount('');
   }
 
   const chartData = {
-    labels: history.map((_, i) => i + 1),
+    labels: history.map((_, i) => i),
     datasets: [{
-      label: selectedTicker,
+      label: `${ticker} Price`,
       data: history,
-      borderColor: '#c084fc',
-      backgroundColor: 'rgba(192,132,252,0.1)',
-      tension: 0.25
+      borderColor: '#14b8a6',
+      backgroundColor: 'rgba(20,184,166,0.15)',
+      tension: 0.35
     }]
   };
 
   return (
-    <div className="container">
-      <div className="header">
-        <div>
-          <h2>MarketPulse</h2>
-          <p className="muted">Live Trading & Portfolio Simulator</p>
+    <div className="neo-container">
+      <aside className="neo-sidebar">
+        <h2>TradeSphere</h2>
+        <p className="neo-muted">Market Control Panel</p>
+
+        <div className="neo-status">
+          Status: <span className={connected ? 'live' : 'offline'}>
+            {connected ? 'LIVE' : 'OFFLINE'}
+          </span>
         </div>
-        <div>
-          <strong>{email}</strong>
-          <button className="btn small" onClick={() => {
-            localStorage.clear();
-            window.location.href = '/login';
-          }}>
-            Logout
-          </button>
-        </div>
-      </div>
 
-      <div className="note">
-        📊 Simulated market environment for educational purposes
-      </div>
+        <div className="neo-user">{email}</div>
 
-      <div className="status">
-        Market Feed: <span className={connected ? 'connected' : 'disconnected'}>
-          {connected ? 'Live' : 'Offline'}
-        </span>
-      </div>
+        <button className="neo-logout" onClick={() => {
+          localStorage.clear();
+          window.location.href = '/login';
+        }}>
+          Logout
+        </button>
+      </aside>
 
-      <div className="cols">
-        <div className="col">
-          <h3>Market Watch</h3>
-          <ul className="list">
-            {supported.map(t => (
-              <li key={t} className="list-item">
-                <strong>{t}</strong>
-                <span>${prices[t]?.toFixed(2) || '—'}</span>
-                <button className="btn small" onClick={() => setSelectedTicker(t)}>View</button>
-              </li>
+      <main className="neo-main">
+        <section className="neo-market">
+          <h3>Market Snapshot</h3>
+          <div className="neo-cards">
+            {supported.map(s => (
+              <div
+                key={s}
+                className={`neo-card ${ticker === s ? 'active' : ''}`}
+                onClick={() => setTicker(s)}
+              >
+                <div>{s}</div>
+                <strong>${prices[s]?.toFixed(2) || '--'}</strong>
+              </div>
             ))}
-          </ul>
-        </div>
-
-        <div className="col">
-          <h3>Price Movement — {selectedTicker}</h3>
-          <div className="chart-card" style={{height:320}}>
-            <Line data={chartData} options={chartOptions} />
           </div>
+        </section>
 
-          <h3>Quick Trade</h3>
-          <div style={{display:'flex',gap:8}}>
-            <input type="number" value={qty} onChange={e => setQty(e.target.value)} />
-            <button className="btn" onClick={() => doTrade('buy')}>Buy</button>
-            <button className="btn" onClick={() => doTrade('sell')}>Sell</button>
+        <section className="neo-chart">
+          <Line data={chartData} />
+        </section>
+
+        <section className="neo-trade">
+          <h3>Execute Trade</h3>
+          <input type="number" value={qty} onChange={e => setQty(e.target.value)} />
+          <div className="neo-actions">
+            <button onClick={() => trade('buy')}>BUY</button>
+            <button onClick={() => trade('sell')}>SELL</button>
           </div>
-          <div className="muted">{tradeMsg}</div>
+        </section>
 
-          <h3>My Holdings</h3>
-          <table className="table">
+        <section className="neo-portfolio">
+          <h3>Holdings Overview</h3>
+          <table>
             <thead>
               <tr><th>Stock</th><th>Qty</th><th>Price</th><th>P/L</th></tr>
             </thead>
@@ -230,7 +167,7 @@ export default function Dashboard() {
                   <td>{h.ticker}</td>
                   <td>{h.qty}</td>
                   <td>${h.current_price.toFixed(2)}</td>
-                  <td className={h.unrealized >= 0 ? 'pl-positive' : 'pl-negative'}>
+                  <td className={h.unrealized >= 0 ? 'pos' : 'neg'}>
                     {h.unrealized.toFixed(2)}
                   </td>
                 </tr>
@@ -238,22 +175,11 @@ export default function Dashboard() {
             </tbody>
           </table>
 
-          <div style={{marginTop:8}}>
-            <strong>Cash:</strong> ${portfolio.cash.toFixed(2)} &nbsp;
-            <strong>Unrealized:</strong> {portfolio.unrealized.toFixed(2)}
+          <div className="neo-summary">
+            Cash: ${portfolio.cash.toFixed(2)} | Unrealized: {portfolio.unrealized.toFixed(2)}
           </div>
-
-          <div style={{marginTop:10}}>
-            <input
-              type="number"
-              placeholder="Add funds"
-              value={depositAmount}
-              onChange={e => setDepositAmount(e.target.value)}
-            />
-            <button className="btn" onClick={depositCash}>Add</button>
-          </div>
-        </div>
-      </div>
+        </section>
+      </main>
     </div>
   );
 }
